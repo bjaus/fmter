@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/mattn/go-runewidth"
 )
 
 func writeMarkdown[T any](w io.Writer, items []T) error {
@@ -30,14 +32,14 @@ func writeMarkdown[T any](w io.Writer, items []T) error {
 	// Calculate column widths (minimum 3 for alignment markers).
 	widths := make([]int, numCols)
 	for i, col := range header {
-		if len(col) > widths[i] {
-			widths[i] = len(col)
+		if w := runewidth.StringWidth(col); w > widths[i] {
+			widths[i] = w
 		}
 	}
 	for _, row := range rows {
 		for i, cell := range row {
-			if i < numCols && len(cell) > widths[i] {
-				widths[i] = len(cell)
+			if w := runewidth.StringWidth(cell); i < numCols && w > widths[i] {
+				widths[i] = w
 			}
 		}
 	}

@@ -7,9 +7,12 @@ import (
 	"testing"
 
 	"github.com/bjaus/fmter"
+	"github.com/mattn/go-runewidth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func displayWidth(s string) int { return runewidth.StringWidth(s) }
 
 // --- Test types: minimal ---
 
@@ -870,6 +873,36 @@ func TestWriteTableTruncated(t *testing.T) {
 	assert.Contains(t, out, "30")
 	// Full name should not appear.
 	assert.NotContains(t, out, "Alexander")
+}
+
+// --- Unicode width ---
+
+type unicodeRow struct {
+	col1 string
+	col2 string
+}
+
+func (r unicodeRow) Row() []string    { return []string{r.col1, r.col2} }
+func (r unicodeRow) Header() []string { return []string{"Key", "Value"} }
+
+func TestWriteTableUnicodeWidth(t *testing.T) {
+	t.Parallel()
+	// Em dash "—" is 1 display column but 3 bytes. Borders must align.
+	items := []unicodeRow{
+		{col1: "Parent", col2: "PROJ-100 — Login Epic"},
+		{col1: "Status", col2: "In Progress"},
+	}
+	var buf bytes.Buffer
+	err := fmter.Write(&buf, fmter.Table, items...)
+	require.NoError(t, err)
+	out := buf.String()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	// All lines must have the same display width for aligned borders.
+	require.True(t, len(lines) >= 2)
+	firstWidth := displayWidth(lines[0])
+	for i, line := range lines[1:] {
+		assert.Equal(t, firstWidth, displayWidth(line), "line %d width mismatch: %q", i+1, line)
+	}
 }
 
 // --- Quoted ENV ---

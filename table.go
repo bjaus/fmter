@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/mattn/go-runewidth"
 )
 
 type borderChars struct {
@@ -153,20 +155,20 @@ func colCount(header []string, rows [][]string, footer []string) int {
 func computeWidths(numCols int, header []string, rows [][]string, footer []string) []int {
 	widths := make([]int, numCols)
 	for i, h := range header {
-		if len(h) > widths[i] {
-			widths[i] = len(h)
+		if w := runewidth.StringWidth(h); w > widths[i] {
+			widths[i] = w
 		}
 	}
 	for _, row := range rows {
 		for i, cell := range row {
-			if i < numCols && len(cell) > widths[i] {
-				widths[i] = len(cell)
+			if w := runewidth.StringWidth(cell); i < numCols && w > widths[i] {
+				widths[i] = w
 			}
 		}
 	}
 	for i, cell := range footer {
-		if i < numCols && len(cell) > widths[i] {
-			widths[i] = len(cell)
+		if w := runewidth.StringWidth(cell); i < numCols && w > widths[i] {
+			widths[i] = w
 		}
 	}
 	return widths
@@ -333,18 +335,18 @@ func drawBorderedRow(w io.Writer, cells []string, widths []int, aligns []Alignme
 }
 
 func formatTableCell(s string, width int, align Alignment) string {
-	if width > 0 && len(s) > width {
+	if width > 0 && runewidth.StringWidth(s) > width {
 		if width <= 3 {
-			s = s[:width]
+			s = runewidth.Truncate(s, width, "")
 		} else {
-			s = s[:width-3] + "..."
+			s = runewidth.Truncate(s, width, "...")
 		}
 	}
 	return alignCell(s, width, align)
 }
 
 func alignCell(s string, width int, align Alignment) string {
-	pad := width - len(s)
+	pad := width - runewidth.StringWidth(s)
 	if pad <= 0 {
 		return s
 	}
