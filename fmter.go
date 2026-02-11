@@ -26,11 +26,15 @@ const (
 	Markdown Format = "markdown"
 	List     Format = "list"
 	ENV      Format = "env"
+	Plain    Format = "plain"
+	TSV      Format = "tsv"
+	JSONL    Format = "jsonl"
+	HTML     Format = "html"
 )
 
 const goTemplatePrefix = "go-template="
 
-var formats = []Format{JSON, YAML, CSV, Table, Markdown, List, ENV}
+var formats = []Format{JSON, YAML, CSV, Table, Markdown, List, ENV, Plain, TSV, JSONL, HTML}
 
 // String returns the format name.
 func (f Format) String() string { return string(f) }
@@ -72,9 +76,9 @@ func IsSupported[T any](f Format) bool {
 	var zero T
 	v := any(zero)
 	switch f {
-	case JSON, YAML:
+	case JSON, YAML, Plain, JSONL:
 		return true
-	case CSV, Table:
+	case CSV, Table, TSV, HTML:
 		_, ok := v.(Rower)
 		return ok
 	case Markdown:
@@ -197,6 +201,49 @@ type Quoted interface {
 	Quote() bool
 }
 
+// Styled provides per-column style functions for Table format.
+// Each function wraps the fully formatted cell string (after truncation and
+// alignment). Nil entries mean no styling for that column. Style functions
+// are applied as the last step before writing, so ANSI codes never affect
+// width calculations.
+type Styled interface {
+	Styles() []func(string) string
+}
+
+// Sorted is a metadata-only interface that declares a default sort column.
+// The package does NOT sort; callers (CLI frameworks) can read this to apply
+// sorting before rendering.
+type Sorted interface {
+	Sort() (column int, descending bool)
+}
+
+// Grouped returns a group key for the item. When consecutive items have
+// different group keys, a separator line is inserted between them in Table
+// format.
+type Grouped interface {
+	Group() string
+}
+
+// Wrapped provides per-column maximum widths for text wrapping in Table
+// format. Cells exceeding the width wrap to multiple visual lines within
+// the same row. A zero value means no wrapping for that column.
+type Wrapped interface {
+	WrapWidths() []int
+}
+
+// Paged controls header repetition for Table format. The header row is
+// re-printed every PageSize data rows.
+type Paged interface {
+	PageSize() int
+}
+
+// Formatter is an escape hatch checked per-item. If Format returns non-nil
+// bytes, those bytes are written directly. If it returns (nil, nil), the
+// item falls through to default rendering.
+type Formatter interface {
+	Format(Format) ([]byte, error)
+}
+
 // --- Value Types ---
 
 // BorderStyle controls table border characters.
@@ -221,6 +268,12 @@ const (
 
 // Write formats items and writes to w.
 func Write[T any](w io.Writer, f Format, items ...T) error {
+	if len(items) > 0 {
+		if fmtr, ok := any(items[0]).(Formatter); ok {
+			_ = fmtr // type check on first item
+			return writeFormatted(w, f, items)
+		}
+	}
 	switch f {
 	case JSON:
 		return writeJSON(w, items)
@@ -236,9 +289,68 @@ func Write[T any](w io.Writer, f Format, items ...T) error {
 		return writeList(w, items)
 	case ENV:
 		return writeENV(w, items)
+	case Plain:
+		return writePlain(w, items)
+	case TSV:
+		return writeTSV(w, items)
+	case JSONL:
+		return writeJSONL(w, items)
+	case HTML:
+		return writeHTML(w, items)
 	default:
 		if tmpl, ok := strings.CutPrefix(string(f), goTemplatePrefix); ok {
 			return writeGoTemplate(w, tmpl, items)
+		}
+		return fmt.Errorf("%w: %q", ErrUnsupportedFormat, f)
+	}
+}
+
+func writeFormatted[T any](w io.Writer, f Format, items []T) error {
+	var fallback []T
+	for _, item := range items {
+		fmtr := any(item).(Formatter)
+		data, err := fmtr.Format(f)
+		if err != nil {
+			return err
+		}
+		if data != nil {
+			if _, werr := w.Write(data); werr != nil {
+				return werr
+			}
+			continue
+		}
+		fallback = append(fallback, item)
+	}
+	if len(fallback) == 0 {
+		return nil
+	}
+	// Temporarily strip the Formatter interface by routing through standard dispatch.
+	switch f {
+	case JSON:
+		return writeJSON(w, fallback)
+	case YAML:
+		return writeYAML(w, fallback)
+	case CSV:
+		return writeCSV(w, fallback)
+	case Table:
+		return writeTable(w, fallback)
+	case Markdown:
+		return writeMarkdown(w, fallback)
+	case List:
+		return writeList(w, fallback)
+	case ENV:
+		return writeENV(w, fallback)
+	case Plain:
+		return writePlain(w, fallback)
+	case TSV:
+		return writeTSV(w, fallback)
+	case JSONL:
+		return writeJSONL(w, fallback)
+	case HTML:
+		return writeHTML(w, fallback)
+	default:
+		if tmpl, ok := strings.CutPrefix(string(f), goTemplatePrefix); ok {
+			return writeGoTemplate(w, tmpl, fallback)
 		}
 		return fmt.Errorf("%w: %q", ErrUnsupportedFormat, f)
 	}

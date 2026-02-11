@@ -30,3 +30,12 @@ func writeCSV[T any](w io.Writer, items []T) error {
 	cw.Flush()
 	return cw.Error()
 }
+
+func writeCSVRow(w io.Writer, row []string) error {
+	cw := csv.NewWriter(w)
+	if err := cw.Write(row); err != nil {
+		return err
+	}
+	cw.Flush()
+	return cw.Error()
+}

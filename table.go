@@ -93,6 +93,29 @@ func writeTable[T any](w io.Writer, items []T) error {
 		caption = c.Caption()
 	}
 
+	var styles []func(string) string
+	if s, ok := first.(Styled); ok {
+		styles = s.Styles()
+	}
+
+	var groups []string
+	if _, ok := first.(Grouped); ok {
+		groups = make([]string, len(items))
+		for i, item := range items {
+			groups[i] = any(item).(Grouped).Group()
+		}
+	}
+
+	var wrapWidths []int
+	if wr, ok := first.(Wrapped); ok {
+		wrapWidths = wr.WrapWidths()
+	}
+
+	pageSize := 0
+	if p, ok := first.(Paged); ok {
+		pageSize = p.PageSize()
+	}
+
 	// Apply row numbering by prepending a column.
 	if numbered {
 		if len(header) > 0 {
@@ -105,6 +128,10 @@ func writeTable[T any](w io.Writer, items []T) error {
 			footer = append([]string{""}, footer...)
 		}
 		aligns = append([]Alignment{AlignRight}, aligns...)
+		styles = append([]func(string) string{nil}, styles...)
+		if len(wrapWidths) > 0 {
+			wrapWidths = append([]int{0}, wrapWidths...)
+		}
 	}
 
 	numCols := colCount(header, rows, footer)
@@ -120,12 +147,13 @@ func writeTable[T any](w io.Writer, items []T) error {
 	}
 
 	aligns = extendAligns(aligns, numCols)
+	styles = extendStyles(styles, numCols)
 
 	var err error
 	if border == BorderNone {
-		err = renderPlainTable(w, header, rows, footer, widths, aligns)
+		err = renderPlainTable(w, header, rows, footer, widths, aligns, styles, groups, wrapWidths, pageSize)
 	} else {
-		err = renderBorderedTable(w, title, header, rows, footer, widths, aligns, border)
+		err = renderBorderedTable(w, title, header, rows, footer, widths, aligns, border, styles, groups, wrapWidths, pageSize)
 	}
 	if err != nil {
 		return err
@@ -183,19 +211,97 @@ func extendAligns(aligns []Alignment, numCols int) []Alignment {
 	return extended
 }
 
+func extendStyles(styles []func(string) string, numCols int) []func(string) string {
+	if len(styles) >= numCols {
+		return styles[:numCols]
+	}
+	extended := make([]func(string) string, numCols)
+	copy(extended, styles)
+	return extended
+}
+
+// --- Cell wrapping ---
+
+func wrapCell(s string, width int) []string {
+	if width <= 0 || runewidth.StringWidth(s) <= width {
+		return []string{s}
+	}
+	var lines []string
+	for len(s) > 0 {
+		line := runewidth.Truncate(s, width, "")
+		lineWidth := runewidth.StringWidth(line)
+		if lineWidth == 0 && len(s) > 0 {
+			// Safety: advance at least one rune to avoid infinite loop.
+			r := []rune(s)
+			line = string(r[0])
+			lineWidth = runewidth.RuneWidth(r[0])
+		}
+		lines = append(lines, line)
+		s = s[len(line):]
+	}
+	return lines
+}
+
+func wrapRow(cells []string, widths []int, wrapWidths []int) [][]string {
+	wrapped := make([][]string, len(widths))
+	for i, width := range widths {
+		cell := ""
+		if i < len(cells) {
+			cell = cells[i]
+		}
+		ww := 0
+		if i < len(wrapWidths) {
+			ww = wrapWidths[i]
+		}
+		if ww > 0 && ww < width {
+			// Use wrap width for wrapping but column width for formatting.
+			wrapped[i] = wrapCell(cell, ww)
+		} else {
+			wrapped[i] = []string{cell}
+		}
+	}
+	return wrapped
+}
+
+func maxLines(wrapped [][]string) int {
+	n := 1
+	for _, lines := range wrapped {
+		if len(lines) > n {
+			n = len(lines)
+		}
+	}
+	return n
+}
+
 // --- Plain table (BorderNone) ---
 
-func renderPlainTable(w io.Writer, header []string, rows [][]string, footer []string, widths []int, aligns []Alignment) error {
+func renderPlainTable(w io.Writer, header []string, rows [][]string, footer []string, widths []int, aligns []Alignment, styles []func(string) string, groups []string, wrapWidths []int, pageSize int) error {
 	if len(header) > 0 {
-		if err := writePlainRow(w, header, widths, aligns); err != nil {
+		if err := writePlainRow(w, header, widths, aligns, styles, wrapWidths); err != nil {
 			return err
 		}
 		if err := writePlainSep(w, widths); err != nil {
 			return err
 		}
 	}
-	for _, row := range rows {
-		if err := writePlainRow(w, row, widths, aligns); err != nil {
+	for i, row := range rows {
+		if len(groups) > 0 && i > 0 && groups[i] != groups[i-1] {
+			if err := writePlainSep(w, widths); err != nil {
+				return err
+			}
+		}
+		if pageSize > 0 && len(header) > 0 && i > 0 && i%pageSize == 0 {
+			if err := writePlainSep(w, widths); err != nil {
+				return err
+			}
+			if err := writePlainRow(w, header, widths, aligns, styles, wrapWidths); err != nil {
+				return err
+			}
+			if err := writePlainSep(w, widths); err != nil {
+				return err
+			}
+		}
+		if err := writePlainRow(w, row, widths, aligns, styles, wrapWidths); err != nil {
 			return err
 		}
 	}
@@ -203,7 +309,7 @@ func renderPlainTable(w io.Writer, header []string, rows [][]string, footer []st
 		if err := writePlainSep(w, widths); err != nil {
 			return err
 		}
-		if err := writePlainRow(w, footer, widths, aligns); err != nil {
+		if err := writePlainRow(w, footer, widths, aligns, styles, wrapWidths); err != nil {
 			return err
 		}
 	}
@@ -219,14 +325,41 @@ func writePlainSep(w io.Writer, widths []int) error {
 	return err
 }
 
-func writePlainRow(w io.Writer, cells []string, widths []int, aligns []Alignment) error {
+func writePlainRow(w io.Writer, cells []string, widths []int, aligns []Alignment, styles []func(string) string, wrapWidths []int) error {
+	if len(wrapWidths) > 0 {
+		wrapped := wrapRow(cells, widths, wrapWidths)
+		nLines := maxLines(wrapped)
+		for line := range nLines {
+			parts := make([]string, len(widths))
+			for i, width := range widths {
+				cell := ""
+				if line < len(wrapped[i]) {
+					cell = wrapped[i][line]
+				}
+				formatted := formatTableCell(cell, width, aligns[i])
+				if styles[i] != nil {
+					formatted = styles[i](formatted)
+				}
+				parts[i] = formatted
+			}
+			text := strings.TrimRight(strings.Join(parts, "  "), " ")
+			if _, err := fmt.Fprintln(w, text); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	parts := make([]string, len(widths))
 	for i, width := range widths {
 		cell := ""
 		if i < len(cells) {
 			cell = cells[i]
 		}
-		parts[i] = formatTableCell(cell, width, aligns[i])
+		formatted := formatTableCell(cell, width, aligns[i])
+		if styles[i] != nil {
+			formatted = styles[i](formatted)
+		}
+		parts[i] = formatted
 	}
 	line := strings.TrimRight(strings.Join(parts, "  "), " ")
 	_, err := fmt.Fprintln(w, line)
@@ -235,7 +368,7 @@ func writePlainRow(w io.Writer, cells []string, widths []int, aligns []Alignment
 
 // --- Bordered table ---
 
-func renderBorderedTable(w io.Writer, title string, header []string, rows [][]string, footer []string, widths []int, aligns []Alignment, style BorderStyle) error {
+func renderBorderedTable(w io.Writer, title string, header []string, rows [][]string, footer []string, widths []int, aligns []Alignment, style BorderStyle, styles []func(string) string, groups []string, wrapWidths []int, pageSize int) error {
 	bc := borderSets[style]
 
 	if title != "" {
@@ -259,7 +392,7 @@ func renderBorderedTable(w io.Writer, title string, header []string, rows [][]st
 	}
 
 	if len(header) > 0 {
-		if err := drawBorderedRow(w, header, widths, aligns, bc.vertical); err != nil {
+		if err := drawBorderedRow(w, header, widths, aligns, bc.vertical, styles, wrapWidths); err != nil {
 			return err
 		}
 		if err := drawHLine(w, widths, bc.leftTee, bc.horizontal, bc.cross, bc.rightTee); err != nil {
@@ -267,8 +400,24 @@ func renderBorderedTable(w io.Writer, title string, header []string, rows [][]st
 		}
 	}
 
-	for _, row := range rows {
-		if err := drawBorderedRow(w, row, widths, aligns, bc.vertical); err != nil {
+	for i, row := range rows {
+		if len(groups) > 0 && i > 0 && groups[i] != groups[i-1] {
+			if err := drawHLine(w, widths, bc.leftTee, bc.horizontal, bc.cross, bc.rightTee); err != nil {
+				return err
+			}
+		}
+		if pageSize > 0 && len(header) > 0 && i > 0 && i%pageSize == 0 {
+			if err := drawHLine(w, widths, bc.leftTee, bc.horizontal, bc.cross, bc.rightTee); err != nil {
+				return err
+			}
+			if err := drawBorderedRow(w, header, widths, aligns, bc.vertical, styles, wrapWidths); err != nil {
+				return err
+			}
+			if err := drawHLine(w, widths, bc.leftTee, bc.horizontal, bc.cross, bc.rightTee); err != nil {
+				return err
+			}
+		}
+		if err := drawBorderedRow(w, row, widths, aligns, bc.vertical, styles, wrapWidths); err != nil {
 			return err
 		}
 	}
@@ -277,7 +426,7 @@ func renderBorderedTable(w io.Writer, title string, header []string, rows [][]st
 		if err := drawHLine(w, widths, bc.leftTee, bc.horizontal, bc.cross, bc.rightTee); err != nil {
 			return err
 		}
-		if err := drawBorderedRow(w, footer, widths, aligns, bc.vertical); err != nil {
+		if err := drawBorderedRow(w, footer, widths, aligns, bc.vertical, styles, wrapWidths); err != nil {
 			return err
 		}
 	}
@@ -314,7 +463,36 @@ func drawHLine(w io.Writer, widths []int, left, fill, mid, right string) error {
 	return err
 }
 
-func drawBorderedRow(w io.Writer, cells []string, widths []int, aligns []Alignment, vert string) error {
+func drawBorderedRow(w io.Writer, cells []string, widths []int, aligns []Alignment, vert string, styles []func(string) string, wrapWidths []int) error {
+	if len(wrapWidths) > 0 {
+		wrapped := wrapRow(cells, widths, wrapWidths)
+		nLines := maxLines(wrapped)
+		for line := range nLines {
+			var sb strings.Builder
+			sb.WriteString(vert)
+			for i, width := range widths {
+				cell := ""
+				if line < len(wrapped[i]) {
+					cell = wrapped[i][line]
+				}
+				sb.WriteString(" ")
+				formatted := formatTableCell(cell, width, aligns[i])
+				if styles[i] != nil {
+					formatted = styles[i](formatted)
+				}
+				sb.WriteString(formatted)
+				sb.WriteString(" ")
+				if i < len(widths)-1 {
+					sb.WriteString(vert)
+				}
+			}
+			sb.WriteString(vert)
+			if _, err := fmt.Fprintln(w, sb.String()); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	var sb strings.Builder
 	sb.WriteString(vert)
 	for i, width := range widths {
@@ -323,7 +501,11 @@ func drawBorderedRow(w io.Writer, cells []string, widths []int, aligns []Alignme
 			cell = cells[i]
 		}
 		sb.WriteString(" ")
-		sb.WriteString(formatTableCell(cell, width, aligns[i]))
+		formatted := formatTableCell(cell, width, aligns[i])
+		if styles[i] != nil {
+			formatted = styles[i](formatted)
+		}
+		sb.WriteString(formatted)
 		sb.WriteString(" ")
 		if i < len(widths)-1 {
 			sb.WriteString(vert)
